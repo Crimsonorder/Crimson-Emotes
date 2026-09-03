@@ -1,0 +1,966 @@
+-- ============================================================================
+-- [[ CRIMSON SUITE V6.2: TEAM CHECK & FORCEFIELD FILTER ]]
+-- ============================================================================
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+
+local function GetSafeContainer()
+    if typeof(gethui) == "function" then
+        local s, res = pcall(gethui)
+        if s and res then return res end
+    end
+    local s, coreGui = pcall(function() return game:GetService("CoreGui") end)
+    if s and coreGui then return coreGui end
+    return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local PARENT = GetSafeContainer()
+local OLD_UI = PARENT:FindFirstChild("CrimsonV6Hub")
+if OLD_UI then OLD_UI:Destroy() end
+
+-- [[ ESTADOS GLOBALES ]]
+local selectedKillPlayers = {}
+local protectedPlayer = nil
+local spectateTarget = nil
+
+local isLockedFront = false
+local isSpectating = false
+
+-- Estados de Proximity
+local selfGuardEnabled = false
+local selfRadius = 12
+local playerGuardEnabled = false
+local playerRadius = 15
+
+-- Estados de Speed
+local speedEnabled = false
+local targetSpeed = 36
+
+local lockConn = nil
+local noclipConn = nil
+local selfGuardLoop = nil
+local playerGuardLoop = nil
+local spectateConn = nil
+local speedConn = nil
+
+-- [[ CÍRCULOS 3D EN EL SUELO ]]
+local selfCircle = Instance.new("CylinderHandleAdornment")
+selfCircle.Name = "SelfCircleAdornment"
+selfCircle.Height = 0.15
+selfCircle.Radius = selfRadius
+selfCircle.Color3 = Color3.fromRGB(255, 35, 60)
+selfCircle.Transparency = 0.6
+selfCircle.CFrame = CFrame.Angles(math.rad(90), 0, 0)
+selfCircle.AlwaysOnTop = true
+selfCircle.ZIndex = 5
+selfCircle.Parent = PARENT
+
+local targetCircle = Instance.new("CylinderHandleAdornment")
+targetCircle.Name = "TargetCircleAdornment"
+targetCircle.Height = 0.15
+targetCircle.Radius = playerRadius
+targetCircle.Color3 = Color3.fromRGB(0, 210, 255)
+targetCircle.Transparency = 0.6
+targetCircle.CFrame = CFrame.Angles(math.rad(90), 0, 0)
+targetCircle.AlwaysOnTop = true
+targetCircle.ZIndex = 5
+targetCircle.Parent = PARENT
+
+-- [[ FILTRO DE EQUIPO Y DAÑO VÁLIDO ]]
+local function isTeammate(player)
+    if not player or player == LocalPlayer then return true end
+    if player == protectedPlayer then return true end
+
+    -- Comprobación de equipo (Team / TeamColor)
+    if not player.Neutral and not LocalPlayer.Neutral then
+        if player.Team and LocalPlayer.Team and player.Team == LocalPlayer.Team then
+            return true
+        end
+        if player.TeamColor and LocalPlayer.TeamColor and player.TeamColor == LocalPlayer.TeamColor then
+            return true
+        end
+    end
+    return false
+end
+
+local function canDamage(player, char)
+    if not player or not char then return false end
+    if isTeammate(player) then return false end
+
+    -- Ignorar si tiene escudo activo (ForceField)
+    if char:FindFirstChildWhichIsA("ForceField") then
+        return false
+    end
+
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then
+        return false
+    end
+
+    return true
+end
+
+-- [[ INTERFAZ ]]
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "CrimsonV6Hub"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = PARENT
+
+-- 1. PESTAÑA / BOTÓN FLOTANTE
+local TabToggleBtn = Instance.new("TextButton")
+TabToggleBtn.Size = UDim2.fromOffset(75, 24)
+TabToggleBtn.Position = UDim2.new(0, 10, 0.5, -12)
+TabToggleBtn.BackgroundColor3 = Color3.fromRGB(255, 35, 60)
+TabToggleBtn.Text = "MENU [≡]"
+TabToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+TabToggleBtn.Font = Enum.Font.GothamBold
+TabToggleBtn.TextSize = 10
+TabToggleBtn.Active = true
+TabToggleBtn.Parent = ScreenGui
+
+Instance.new("UICorner", TabToggleBtn).CornerRadius = UDim.new(0, 6)
+local TabStroke = Instance.new("UIStroke", TabToggleBtn)
+TabStroke.Thickness = 1.2
+TabStroke.Color = Color3.fromRGB(255, 255, 255)
+
+local tDragging, tDragStart, tStartPos
+TabToggleBtn.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        tDragging = true
+        tDragStart = input.Position
+        tStartPos = TabToggleBtn.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then tDragging = false end
+        end)
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if tDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - tDragStart
+        TabToggleBtn.Position = UDim2.new(tStartPos.X.Scale, tStartPos.X.Offset + delta.X, tStartPos.Y.Scale, tStartPos.Y.Offset + delta.Y)
+    end
+end)
+
+-- 2. PANEL PRINCIPAL
+local Main = Instance.new("Frame")
+Main.Size = UDim2.fromOffset(205, 330)
+Main.Position = UDim2.new(0.5, -102, 0.5, -165)
+Main.BackgroundColor3 = Color3.fromRGB(15, 16, 20)
+Main.BorderSizePixel = 0
+Main.Active = true
+Main.Visible = true
+Main.Parent = ScreenGui
+
+Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 8)
+local MainStroke = Instance.new("UIStroke", Main)
+MainStroke.Thickness = 1.5
+MainStroke.Color = Color3.fromRGB(255, 35, 60)
+
+TabToggleBtn.MouseButton1Click:Connect(function()
+    Main.Visible = not Main.Visible
+end)
+
+local TopBar = Instance.new("Frame")
+TopBar.Size = UDim2.new(1, 0, 0, 22)
+TopBar.BackgroundColor3 = Color3.fromRGB(11, 12, 15)
+TopBar.BorderSizePixel = 0
+TopBar.Parent = Main
+Instance.new("UICorner", TopBar).CornerRadius = UDim.new(0, 8)
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -26, 1, 0)
+Title.Position = UDim2.new(0, 8, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "APEX SUITE // V6.2"
+Title.TextColor3 = Color3.fromRGB(240, 240, 245)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 9
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = TopBar
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.fromOffset(20, 20)
+CloseBtn.Position = UDim2.new(1, -22, 0, 1)
+CloseBtn.BackgroundTransparency = 1
+CloseBtn.Text = "✕"
+CloseBtn.TextColor3 = Color3.fromRGB(180, 180, 190)
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 10
+CloseBtn.Parent = TopBar
+CloseBtn.MouseButton1Click:Connect(function() Main.Visible = false end)
+
+local mDragging, mDragStart, mStartPos
+TopBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        mDragging = true
+        mDragStart = input.Position
+        mStartPos = Main.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then mDragging = false end
+        end)
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if mDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - mDragStart
+        Main.Position = UDim2.new(mStartPos.X.Scale, mStartPos.X.Offset + delta.X, mStartPos.Y.Scale, mStartPos.Y.Offset + delta.Y)
+    end
+end)
+
+local Controls = Instance.new("ScrollingFrame")
+Controls.Size = UDim2.new(1, -12, 1, -28)
+Controls.Position = UDim2.new(0, 6, 0, 25)
+Controls.BackgroundTransparency = 1
+Controls.BorderSizePixel = 0
+Controls.ScrollBarThickness = 2
+Controls.AutomaticCanvasSize = Enum.AutomaticSize.Y
+Controls.Parent = Main
+
+local CLayout = Instance.new("UIListLayout", Controls)
+CLayout.Padding = UDim.new(0, 3)
+
+local function makeBtn(txt, col, h)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, 0, 0, h or 20)
+    b.BackgroundColor3 = col
+    b.Text = txt
+    b.TextColor3 = Color3.fromRGB(255, 255, 255)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 9
+    b.Parent = Controls
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
+    return b
+end
+
+local function makeSep()
+    local s = Instance.new("Frame")
+    s.Size = UDim2.new(1, 0, 0, 1)
+    s.BackgroundColor3 = Color3.fromRGB(45, 46, 55)
+    s.BorderSizePixel = 0
+    s.Parent = Controls
+    return s
+end
+
+-- SECCIÓN 1: TARGET PURGE
+local BtnOpenKillList = makeBtn("LISTA OBJETIVOS  ▼", Color3.fromRGB(28, 29, 36), 21)
+local BtnKillAction   = makeBtn("KILL PLAYER", Color3.fromRGB(210, 30, 50), 24)
+local BtnReleaseAction= makeBtn("SOLTAR PLAYER", Color3.fromRGB(38, 39, 46), 19)
+
+makeSep()
+
+-- SECCIÓN 2: AUTO-DEFENSA PERSONAL
+local BtnToggleSelfGuard = makeBtn("MI CÍRCULO: [OFF]", Color3.fromRGB(35, 36, 42), 22)
+
+local SelfSliderLabel = Instance.new("TextLabel")
+SelfSliderLabel.Size = UDim2.new(1, 0, 0, 11)
+SelfSliderLabel.BackgroundTransparency = 1
+SelfSliderLabel.Text = "MI RADIO: " .. tostring(selfRadius) .. " STUDS"
+SelfSliderLabel.TextColor3 = Color3.fromRGB(255, 75, 95)
+SelfSliderLabel.Font = Enum.Font.GothamBold
+SelfSliderLabel.TextSize = 8
+SelfSliderLabel.Parent = Controls
+
+local SelfSliderTrack = Instance.new("Frame")
+SelfSliderTrack.Size = UDim2.new(1, 0, 0, 7)
+SelfSliderTrack.BackgroundColor3 = Color3.fromRGB(25, 27, 34)
+SelfSliderTrack.BorderSizePixel = 0
+SelfSliderTrack.Parent = Controls
+Instance.new("UICorner", SelfSliderTrack).CornerRadius = UDim.new(0, 4)
+
+local SelfSliderFill = Instance.new("Frame")
+SelfSliderFill.Size = UDim2.new((selfRadius - 4) / 46, 0, 1, 0)
+SelfSliderFill.BackgroundColor3 = Color3.fromRGB(255, 35, 60)
+SelfSliderFill.BorderSizePixel = 0
+SelfSliderFill.Parent = SelfSliderTrack
+Instance.new("UICorner", SelfSliderFill).CornerRadius = UDim.new(0, 4)
+
+makeSep()
+
+-- SECCIÓN 3: SPEED
+local BtnToggleSpeed = makeBtn("SPEED: [OFF]", Color3.fromRGB(35, 36, 42), 22)
+
+local SpeedSliderLabel = Instance.new("TextLabel")
+SpeedSliderLabel.Size = UDim2.new(1, 0, 0, 11)
+SpeedSliderLabel.BackgroundTransparency = 1
+SpeedSliderLabel.Text = "VELOCIDAD: " .. tostring(targetSpeed)
+SpeedSliderLabel.TextColor3 = Color3.fromRGB(255, 200, 0)
+SpeedSliderLabel.Font = Enum.Font.GothamBold
+SpeedSliderLabel.TextSize = 8
+SpeedSliderLabel.Parent = Controls
+
+local SpeedSliderTrack = Instance.new("Frame")
+SpeedSliderTrack.Size = UDim2.new(1, 0, 0, 7)
+SpeedSliderTrack.BackgroundColor3 = Color3.fromRGB(25, 27, 34)
+SpeedSliderTrack.BorderSizePixel = 0
+SpeedSliderTrack.Parent = Controls
+Instance.new("UICorner", SpeedSliderTrack).CornerRadius = UDim.new(0, 4)
+
+local SpeedSliderFill = Instance.new("Frame")
+SpeedSliderFill.Size = UDim2.new((targetSpeed - 16) / 104, 0, 1, 0)
+SpeedSliderFill.BackgroundColor3 = Color3.fromRGB(255, 200, 0)
+SpeedSliderFill.BorderSizePixel = 0
+SpeedSliderFill.Parent = SpeedSliderTrack
+Instance.new("UICorner", SpeedSliderFill).CornerRadius = UDim.new(0, 4)
+
+makeSep()
+
+-- SECCIÓN 4: PROXIMITY
+local BtnOpenProxList = makeBtn("PROXIMITY TARGET  ▼", Color3.fromRGB(28, 29, 36), 20)
+local BtnTogglePlayerGuard = makeBtn("GUARDIA TARGET: [OFF]", Color3.fromRGB(35, 36, 42), 20)
+
+makeSep()
+
+-- SECCIÓN 5: SPECTATE
+local BtnOpenSpecList = makeBtn("LISTA SPECTATE  ▼", Color3.fromRGB(28, 29, 36), 20)
+
+local SpecBtnRow = Instance.new("Frame")
+SpecBtnRow.Size = UDim2.new(1, 0, 0, 21)
+SpecBtnRow.BackgroundTransparency = 1
+SpecBtnRow.Parent = Controls
+
+local SpecRowLayout = Instance.new("UIListLayout", SpecBtnRow)
+SpecRowLayout.FillDirection = Enum.FillDirection.Horizontal
+SpecRowLayout.Padding = UDim.new(0, 4)
+
+local BtnSpectate = Instance.new("TextButton")
+BtnSpectate.Size = UDim2.new(0.5, -2, 1, 0)
+BtnSpectate.BackgroundColor3 = Color3.fromRGB(130, 40, 210)
+BtnSpectate.Text = "SPECTATE"
+BtnSpectate.TextColor3 = Color3.fromRGB(255, 255, 255)
+BtnSpectate.Font = Enum.Font.GothamBold
+BtnSpectate.TextSize = 9
+BtnSpectate.Parent = SpecBtnRow
+Instance.new("UICorner", BtnSpectate).CornerRadius = UDim.new(0, 5)
+
+local BtnUnspectate = Instance.new("TextButton")
+BtnUnspectate.Size = UDim2.new(0.5, -2, 1, 0)
+BtnUnspectate.BackgroundColor3 = Color3.fromRGB(45, 46, 55)
+BtnUnspectate.Text = "UNSPECTATE"
+BtnUnspectate.TextColor3 = Color3.fromRGB(220, 220, 230)
+BtnUnspectate.Font = Enum.Font.GothamBold
+BtnUnspectate.TextSize = 9
+BtnUnspectate.Parent = SpecBtnRow
+Instance.new("UICorner", BtnUnspectate).CornerRadius = UDim.new(0, 5)
+
+-- ============================================================================
+-- [[ MENÚS LATERALES DESPLEGABLES ]]
+-- ============================================================================
+
+local function makeDropdown(titleText, strokeColor)
+    local drop = Instance.new("Frame")
+    drop.Size = UDim2.fromOffset(145, 330)
+    drop.Position = UDim2.new(1, 6, 0, 0)
+    drop.BackgroundColor3 = Color3.fromRGB(13, 14, 18)
+    drop.BorderSizePixel = 0
+    drop.Visible = false
+    drop.Parent = Main
+    Instance.new("UICorner", drop).CornerRadius = UDim.new(0, 8)
+    
+    local strk = Instance.new("UIStroke", drop)
+    strk.Thickness = 1.2
+    strk.Color = strokeColor
+
+    local dTitle = Instance.new("TextLabel")
+    dTitle.Size = UDim2.new(1, 0, 0, 20)
+    dTitle.BackgroundTransparency = 1
+    dTitle.Text = titleText
+    dTitle.TextColor3 = strokeColor
+    dTitle.Font = Enum.Font.GothamBold
+    dTitle.TextSize = 9
+    dTitle.Parent = drop
+
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.new(1, -8, 1, -24)
+    scroll.Position = UDim2.new(0, 4, 0, 20)
+    scroll.BackgroundColor3 = Color3.fromRGB(9, 10, 12)
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 3
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    scroll.Parent = drop
+
+    local lyt = Instance.new("UIListLayout", scroll)
+    lyt.Padding = UDim.new(0, 3)
+
+    return drop, scroll
+end
+
+local DropKill, ScrollKill = makeDropdown("OBJETIVOS (KILL)", Color3.fromRGB(255, 35, 60))
+local DropProx, ScrollProx = makeDropdown("PROTEGER JUGADOR", Color3.fromRGB(0, 210, 255))
+local DropSpec, ScrollSpec = makeDropdown("ELEGIR SPECTATE", Color3.fromRGB(160, 60, 255))
+
+BtnOpenKillList.MouseButton1Click:Connect(function()
+    DropProx.Visible = false
+    DropSpec.Visible = false
+    DropKill.Visible = not DropKill.Visible
+end)
+
+BtnOpenProxList.MouseButton1Click:Connect(function()
+    DropKill.Visible = false
+    DropSpec.Visible = false
+    DropProx.Visible = not DropProx.Visible
+end)
+
+BtnOpenSpecList.MouseButton1Click:Connect(function()
+    DropKill.Visible = false
+    DropProx.Visible = false
+    DropSpec.Visible = not DropSpec.Visible
+end)
+
+-- Slider: Mi Radio
+local isSlidingSelf = false
+local function updateSelfSlider(input)
+    local rel = math.clamp((input.Position.X - SelfSliderTrack.AbsolutePosition.X) / SelfSliderTrack.AbsoluteSize.X, 0, 1)
+    SelfSliderFill.Size = UDim2.new(rel, 0, 1, 0)
+    selfRadius = math.floor(4 + (rel * 46))
+    SelfSliderLabel.Text = "MI RADIO: " .. tostring(selfRadius) .. " STUDS"
+    selfCircle.Radius = selfRadius
+end
+
+SelfSliderTrack.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        isSlidingSelf = true
+        updateSelfSlider(input)
+    end
+end)
+
+-- Slider: Velocidad
+local isSlidingSpeed = false
+local function updateSpeedSlider(input)
+    local rel = math.clamp((input.Position.X - SpeedSliderTrack.AbsolutePosition.X) / SpeedSliderTrack.AbsoluteSize.X, 0, 1)
+    SpeedSliderFill.Size = UDim2.new(rel, 0, 1, 0)
+    targetSpeed = math.floor(16 + (rel * 104))
+    SpeedSliderLabel.Text = "VELOCIDAD: " .. tostring(targetSpeed)
+
+    if speedEnabled and LocalPlayer.Character then
+        local hum = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if hum then hum.WalkSpeed = targetSpeed end
+    end
+end
+
+SpeedSliderTrack.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        isSlidingSpeed = true
+        updateSpeedSlider(input)
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        isSlidingSelf = false
+        isSlidingSpeed = false
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if isSlidingSelf and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        updateSelfSlider(input)
+    elseif isSlidingSpeed and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        updateSpeedSlider(input)
+    end
+end)
+
+-- ============================================================================
+-- [[ SPEED ENGINE ]]
+-- ============================================================================
+
+local function applySpeedState(enable)
+    speedEnabled = enable
+    if speedConn then speedConn:Disconnect() speedConn = nil end
+
+    if speedEnabled then
+        BtnToggleSpeed.Text = "SPEED: [ON]"
+        BtnToggleSpeed.BackgroundColor3 = Color3.fromRGB(255, 200, 0)
+
+        speedConn = RunService.Heartbeat:Connect(function()
+            if not speedEnabled then return end
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if hum and hum.WalkSpeed ~= targetSpeed then
+                hum.WalkSpeed = targetSpeed
+            end
+        end)
+    else
+        BtnToggleSpeed.Text = "SPEED: [OFF]"
+        BtnToggleSpeed.BackgroundColor3 = Color3.fromRGB(35, 36, 42)
+
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then hum.WalkSpeed = 16 end
+    end
+end
+
+BtnToggleSpeed.MouseButton1Click:Connect(function()
+    applySpeedState(not speedEnabled)
+end)
+
+-- ============================================================================
+-- [[ MOTOR DE ATAQUE ]]
+-- ============================================================================
+
+local function getWeapon()
+    local char = LocalPlayer.Character
+    local bp = LocalPlayer:FindFirstChild("Backpack")
+    if not char then return nil end
+
+    local names = {"Knife", "Sword", "LinkedSword", "ClassicSword"}
+    for _, n in ipairs(names) do
+        local tool = char:FindFirstChild(n) or (bp and bp:FindFirstChild(n))
+        if tool then return tool end
+    end
+
+    for _, v in ipairs(char:GetChildren()) do if v:IsA("Tool") then return v end end
+    if bp then for _, v in ipairs(bp:GetChildren()) do if v:IsA("Tool") then return v end end end
+    return nil
+end
+
+local function executeInstaKill(targetChar)
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 or not targetChar then return end
+
+    local weapon = getWeapon()
+    if not weapon then return end
+
+    if weapon.Parent == LocalPlayer:FindFirstChild("Backpack") then
+        hum:EquipTool(weapon)
+        task.wait(0.01)
+    end
+
+    if weapon:FindFirstChild("Stab") then
+        weapon.Stab:FireServer("Slash")
+    end
+
+    weapon:Activate()
+
+    local handle = weapon:FindFirstChild("Handle") or weapon:FindFirstChildWhichIsA("BasePart")
+    if handle and typeof(firetouchinterest) == "function" then
+        local tHRP = targetChar:FindFirstChild("HumanoidRootPart") or targetChar:FindFirstChild("Torso") or targetChar:FindFirstChild("UpperTorso")
+        if tHRP then
+            pcall(function()
+                firetouchinterest(tHRP, handle, 0)
+                firetouchinterest(tHRP, handle, 1)
+            end)
+        end
+    end
+end
+
+-- ============================================================================
+-- [[ PURGA DE OBJETIVOS ]]
+-- ============================================================================
+
+local function stopLock()
+    isLockedFront = false
+    BtnKillAction.Text = "KILL PLAYER"
+    BtnKillAction.BackgroundColor3 = Color3.fromRGB(210, 30, 50)
+
+    if lockConn then lockConn:Disconnect() lockConn = nil end
+    if noclipConn then noclipConn:Disconnect() noclipConn = nil end
+
+    for target, _ in pairs(selectedKillPlayers) do
+        if target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
+            target.Character.HumanoidRootPart.AssemblyLinearVelocity = Vector3.zero
+            target.Character.HumanoidRootPart.AssemblyAngularVelocity = Vector3.zero
+        end
+    end
+end
+
+local function startLockAndKill()
+    isLockedFront = true
+    BtnKillAction.Text = "PURGANDO..."
+    BtnKillAction.BackgroundColor3 = Color3.fromRGB(0, 140, 255)
+
+    if noclipConn then noclipConn:Disconnect() end
+    noclipConn = RunService.Stepped:Connect(function()
+        if not isLockedFront then return end
+        for target, isSel in pairs(selectedKillPlayers) do
+            if isSel and target.Character then
+                for _, part in ipairs(target.Character:GetDescendants()) do
+                    if part:IsA("BasePart") then part.CanCollide = false end
+                end
+            end
+        end
+    end)
+
+    if lockConn then lockConn:Disconnect() end
+    lockConn = RunService.Heartbeat:Connect(function()
+        local char = LocalPlayer.Character
+        local myHRP = char and char:FindFirstChild("HumanoidRootPart")
+        if not myHRP then return end
+
+        local count = 0
+        for target, isSel in pairs(selectedKillPlayers) do
+            if isSel and target ~= LocalPlayer and target.Character and canDamage(target, target.Character) then
+                local tChar = target.Character
+                local tHRP = tChar:FindFirstChild("HumanoidRootPart")
+                local tHum = tChar:FindFirstChildOfClass("Humanoid")
+
+                if tHRP and tHum and tHum.Health > 0 then
+                    count = count + 1
+                    local offset = (count - 1) * 1.2
+                    tHRP.CFrame = myHRP.CFrame * CFrame.new(offset, 0, -2.5)
+                    tHRP.AssemblyLinearVelocity = Vector3.zero
+                    tHRP.AssemblyAngularVelocity = Vector3.zero
+                    executeInstaKill(tChar)
+                end
+            end
+        end
+    end)
+end
+
+BtnKillAction.MouseButton1Click:Connect(startLockAndKill)
+BtnReleaseAction.MouseButton1Click:Connect(stopLock)
+
+-- ============================================================================
+-- [[ RENDER DE CÍRCULOS Y PROXIMIDAD ]]
+-- ============================================================================
+
+RunService.RenderStepped:Connect(function()
+    if selfGuardEnabled and LocalPlayer.Character then
+        local myHRP = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if myHRP then
+            selfCircle.Visible = true
+            selfCircle.Adornee = myHRP
+            selfCircle.Radius = selfRadius
+        else
+            selfCircle.Visible = false
+        end
+    else
+        selfCircle.Visible = false
+        selfCircle.Adornee = nil
+    end
+
+    if playerGuardEnabled and protectedPlayer and protectedPlayer.Character then
+        local pHRP = protectedPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if pHRP then
+            targetCircle.Visible = true
+            targetCircle.Adornee = pHRP
+            targetCircle.Radius = playerRadius
+        else
+            targetCircle.Visible = false
+        end
+    else
+        targetCircle.Visible = false
+        targetCircle.Adornee = nil
+    end
+end)
+
+-- Bucle: Mi Círculo (Ignora equipo y jugadores inmunes)
+local selfDebounce = false
+local function runSelfGuardScan()
+    if selfGuardLoop then task.cancel(selfGuardLoop) selfGuardLoop = nil end
+    selfGuardLoop = task.spawn(function()
+        while selfGuardEnabled do
+            task.wait(0.03)
+            local myChar = LocalPlayer.Character
+            local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+
+            if myHRP and not selfDebounce then
+                for _, player in ipairs(Players:GetPlayers()) do
+                    if player.Character and canDamage(player, player.Character) then
+                        local enemyChar = player.Character
+                        local enemyHRP = enemyChar:FindFirstChild("HumanoidRootPart")
+                        local enemyHum = enemyChar:FindFirstChildOfClass("Humanoid")
+
+                        if enemyHRP and enemyHum and enemyHum.Health > 0 then
+                            local dist = (myHRP.Position - enemyHRP.Position).Magnitude
+                            if dist <= selfRadius then
+                                selfDebounce = true
+
+                                for _, p in ipairs(enemyChar:GetDescendants()) do
+                                    if p:IsA("BasePart") then p.CanCollide = false end
+                                end
+
+                                enemyHRP.CFrame = myHRP.CFrame * CFrame.new(0, 0, -2.5)
+                                enemyHRP.AssemblyLinearVelocity = Vector3.zero
+
+                                executeInstaKill(enemyChar)
+                                task.wait(0.08)
+                                selfDebounce = false
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end
+
+BtnToggleSelfGuard.MouseButton1Click:Connect(function()
+    selfGuardEnabled = not selfGuardEnabled
+    if selfGuardEnabled then
+        BtnToggleSelfGuard.Text = "MI CÍRCULO: [ON]"
+        BtnToggleSelfGuard.BackgroundColor3 = Color3.fromRGB(255, 35, 60)
+        runSelfGuardScan()
+    else
+        BtnToggleSelfGuard.Text = "MI CÍRCULO: [OFF]"
+        BtnToggleSelfGuard.BackgroundColor3 = Color3.fromRGB(35, 36, 42)
+        if selfGuardLoop then task.cancel(selfGuardLoop) selfGuardLoop = nil end
+        selfCircle.Visible = false
+    end
+end)
+
+-- Bucle: Proximity Target (Ignora equipo del protegido y jugadores inmunes)
+local targetDebounce = false
+local function runTargetGuardScan()
+    if playerGuardLoop then task.cancel(playerGuardLoop) playerGuardLoop = nil end
+    playerGuardLoop = task.spawn(function()
+        while playerGuardEnabled do
+            task.wait(0.04)
+            if protectedPlayer and protectedPlayer.Character and LocalPlayer.Character then
+                local protHRP = protectedPlayer.Character:FindFirstChild("HumanoidRootPart")
+                local myHRP = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+
+                if protHRP and myHRP and not targetDebounce then
+                    for _, player in ipairs(Players:GetPlayers()) do
+                        if player.Character and canDamage(player, player.Character) then
+                            local enemyChar = player.Character
+                            local enemyHRP = enemyChar:FindFirstChild("HumanoidRootPart")
+                            local enemyHum = enemyChar:FindFirstChildOfClass("Humanoid")
+
+                            if enemyHRP and enemyHum and enemyHum.Health > 0 then
+                                local dist = (protHRP.Position - enemyHRP.Position).Magnitude
+                                if dist <= playerRadius then
+                                    targetDebounce = true
+
+                                    for _, p in ipairs(enemyChar:GetDescendants()) do
+                                        if p:IsA("BasePart") then p.CanCollide = false end
+                                    end
+
+                                    enemyHRP.CFrame = myHRP.CFrame * CFrame.new(0, 0, -2.5)
+                                    enemyHRP.AssemblyLinearVelocity = Vector3.zero
+
+                                    executeInstaKill(enemyChar)
+                                    task.wait(0.08)
+                                    targetDebounce = false
+                                    break
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end
+
+BtnTogglePlayerGuard.MouseButton1Click:Connect(function()
+    playerGuardEnabled = not playerGuardEnabled
+    if playerGuardEnabled then
+        BtnTogglePlayerGuard.Text = "GUARDIA TARGET: [ON]"
+        BtnTogglePlayerGuard.BackgroundColor3 = Color3.fromRGB(0, 180, 255)
+        runTargetGuardScan()
+    else
+        BtnTogglePlayerGuard.Text = "GUARDIA TARGET: [OFF]"
+        BtnTogglePlayerGuard.BackgroundColor3 = Color3.fromRGB(35, 36, 42)
+        if playerGuardLoop then task.cancel(playerGuardLoop) playerGuardLoop = nil end
+        targetCircle.Visible = false
+    end
+end)
+
+-- ============================================================================
+-- [[ SISTEMA SPECTATE ]]
+-- ============================================================================
+
+local function stopSpectate()
+    isSpectating = false
+    if spectateConn then spectateConn:Disconnect() spectateConn = nil end
+
+    local myHum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if myHum then
+        Camera.CameraSubject = myHum
+    end
+    BtnSpectate.Text = "SPECTATE"
+    BtnSpectate.BackgroundColor3 = Color3.fromRGB(130, 40, 210)
+end
+
+local function startSpectate()
+    if not spectateTarget or not spectateTarget.Character then
+        BtnSpectate.Text = "¡ELIGE JUGADOR!"
+        task.delay(1, function() BtnSpectate.Text = "SPECTATE" end)
+        return
+    end
+
+    local tHum = spectateTarget.Character:FindFirstChildOfClass("Humanoid")
+    if not tHum or tHum.Health <= 0 then
+        stopSpectate()
+        return
+    end
+
+    isSpectating = true
+    Camera.CameraSubject = tHum
+    BtnSpectate.Text = "VIENDO: " .. string.sub(spectateTarget.DisplayName, 1, 8)
+    BtnSpectate.BackgroundColor3 = Color3.fromRGB(0, 190, 100)
+
+    if spectateConn then spectateConn:Disconnect() end
+    spectateConn = RunService.RenderStepped:Connect(function()
+        if not isSpectating then
+            if spectateConn then spectateConn:Disconnect() end
+            return
+        end
+
+        if not spectateTarget or not spectateTarget.Parent or not spectateTarget.Character then
+            stopSpectate()
+            return
+        end
+
+        local hum = spectateTarget.Character:FindFirstChildOfClass("Humanoid")
+        if not hum or hum.Health <= 0 then
+            stopSpectate()
+            return
+        end
+
+        if Camera.CameraSubject ~= hum then
+            Camera.CameraSubject = hum
+        end
+    end)
+end
+
+BtnSpectate.MouseButton1Click:Connect(startSpectate)
+BtnUnspectate.MouseButton1Click:Connect(stopSpectate)
+
+-- ============================================================================
+-- [[ LISTAS DINÁMICAS ]]
+-- ============================================================================
+
+local kBtns = {}
+local pBtns = {}
+local sBtns = {}
+
+local function updateAllLists()
+    for _, b in pairs(kBtns) do b:Destroy() end
+    for _, b in pairs(pBtns) do b:Destroy() end
+    for _, b in pairs(sBtns) do b:Destroy() end
+    table.clear(kBtns)
+    table.clear(pBtns)
+    table.clear(sBtns)
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            -- Botón Kill
+            local kb = Instance.new("TextButton")
+            kb.Size = UDim2.new(1, 0, 0, 22)
+            kb.Text = " " .. player.DisplayName
+            kb.Font = Enum.Font.Gotham
+            kb.TextSize = 9
+            kb.TextXAlignment = Enum.TextXAlignment.Left
+            kb.BorderSizePixel = 0
+            kb.AutoButtonColor = false
+            kb.Parent = ScrollKill
+            Instance.new("UICorner", kb).CornerRadius = UDim.new(0, 4)
+
+            if selectedKillPlayers[player] then
+                kb.BackgroundColor3 = Color3.fromRGB(0, 140, 255)
+                kb.TextColor3 = Color3.fromRGB(255, 255, 255)
+            else
+                kb.BackgroundColor3 = Color3.fromRGB(20, 21, 26)
+                kb.TextColor3 = Color3.fromRGB(180, 180, 190)
+            end
+
+            kb.MouseButton1Click:Connect(function()
+                if selectedKillPlayers[player] then
+                    selectedKillPlayers[player] = nil
+                    kb.BackgroundColor3 = Color3.fromRGB(20, 21, 26)
+                    kb.TextColor3 = Color3.fromRGB(180, 180, 190)
+                else
+                    selectedKillPlayers[player] = true
+                    kb.BackgroundColor3 = Color3.fromRGB(0, 140, 255)
+                    kb.TextColor3 = Color3.fromRGB(255, 255, 255)
+                end
+            end)
+            kBtns[player] = kb
+
+            -- Botón Proximity
+            local pb = Instance.new("TextButton")
+            pb.Size = UDim2.new(1, 0, 0, 22)
+            pb.Text = " " .. player.DisplayName
+            pb.Font = Enum.Font.Gotham
+            pb.TextSize = 9
+            pb.TextXAlignment = Enum.TextXAlignment.Left
+            pb.BorderSizePixel = 0
+            pb.AutoButtonColor = false
+            pb.Parent = ScrollProx
+            Instance.new("UICorner", pb).CornerRadius = UDim.new(0, 4)
+
+            if protectedPlayer == player then
+                pb.BackgroundColor3 = Color3.fromRGB(0, 210, 255)
+                pb.TextColor3 = Color3.fromRGB(255, 255, 255)
+            else
+                pb.BackgroundColor3 = Color3.fromRGB(20, 21, 26)
+                pb.TextColor3 = Color3.fromRGB(180, 180, 190)
+            end
+
+            pb.MouseButton1Click:Connect(function()
+                if protectedPlayer == player then
+                    protectedPlayer = nil
+                else
+                    protectedPlayer = player
+                end
+                updateAllLists()
+            end)
+            pBtns[player] = pb
+
+            -- Botón Spectate
+            local sb = Instance.new("TextButton")
+            sb.Size = UDim2.new(1, 0, 0, 22)
+            sb.Text = " " .. player.DisplayName
+            sb.Font = Enum.Font.Gotham
+            sb.TextSize = 9
+            sb.TextXAlignment = Enum.TextXAlignment.Left
+            sb.BorderSizePixel = 0
+            sb.AutoButtonColor = false
+            sb.Parent = ScrollSpec
+            Instance.new("UICorner", sb).CornerRadius = UDim.new(0, 4)
+
+            if spectateTarget == player then
+                sb.BackgroundColor3 = Color3.fromRGB(160, 60, 255)
+                sb.TextColor3 = Color3.fromRGB(255, 255, 255)
+            else
+                sb.BackgroundColor3 = Color3.fromRGB(20, 21, 26)
+                sb.TextColor3 = Color3.fromRGB(180, 180, 190)
+            end
+
+            sb.MouseButton1Click:Connect(function()
+                if spectateTarget == player then
+                    spectateTarget = nil
+                    if isSpectating then stopSpectate() end
+                else
+                    spectateTarget = player
+                    if isSpectating then startSpectate() end
+                end
+                updateAllLists()
+            end)
+            sBtns[player] = sb
+        end
+    end
+end
+
+Players.PlayerAdded:Connect(function() task.wait(0.2) updateAllLists() end)
+Players.PlayerRemoving:Connect(function(player)
+    selectedKillPlayers[player] = nil
+    if protectedPlayer == player then protectedPlayer = nil end
+    if spectateTarget == player then
+        spectateTarget = nil
+        stopSpectate()
+    end
+    updateAllLists()
+end)
+
+LocalPlayer.CharacterAdded:Connect(function(char)
+    task.wait(0.2)
+    if isSpectating then stopSpectate() end
+    if speedEnabled then
+        local hum = char:WaitForChild("Humanoid", 3)
+        if hum then hum.WalkSpeed = targetSpeed end
+    end
+end)
+
+updateAllLists()
