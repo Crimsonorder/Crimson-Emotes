@@ -1,0 +1,566 @@
+-- ============================================================================
+-- [[ CRIMSON HUB: DROPDOWN TARGETS & PROXIMITY DEFENSE ]]
+-- ============================================================================
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+
+local function GetSafeContainer()
+    if typeof(gethui) == "function" then
+        local s, res = pcall(gethui)
+        if s and res then return res end
+    end
+    local s, coreGui = pcall(function() return game:GetService("CoreGui") end)
+    if s and coreGui then return coreGui end
+    return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local PARENT = GetSafeContainer()
+local OLD_UI = PARENT:FindFirstChild("CrimsonDropdownHub")
+if OLD_UI then OLD_UI:Destroy() end
+
+-- [[ VARIABLES GLOBALES ]]
+local selectedKillPlayers = {}   -- Objetivos marcados en azul
+local protectedPlayer = nil      -- Jugador de Proximity seleccionado
+local isLockedFront = false
+local guardEnabled = false
+local guardRadius = 15           -- Radio del círculo por defecto
+
+local lockConn = nil
+local noclipConn = nil
+local guardLoop = nil
+
+-- [[ CÍRCULO 3D EN EL SUELO ]]
+local circleAdornment = Instance.new("CylinderHandleAdornment")
+circleAdornment.Name = "ProximityCircleRing"
+circleAdornment.Height = 0.15
+circleAdornment.Radius = guardRadius
+circleAdornment.Color3 = Color3.fromRGB(0, 210, 255)
+circleAdornment.Transparency = 0.55
+circleAdornment.CFrame = CFrame.Angles(math.rad(90), 0, 0)
+circleAdornment.AlwaysOnTop = true
+circleAdornment.ZIndex = 5
+circleAdornment.Parent = PARENT
+
+-- [[ INTERFAZ ]]
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "CrimsonDropdownHub"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = PARENT
+
+-- Panel Principal (Ultra compacto)
+local Main = Instance.new("Frame")
+Main.Size = UDim2.fromOffset(190, 225)
+Main.Position = UDim2.new(0.5, -95, 0.5, -112)
+Main.BackgroundColor3 = Color3.fromRGB(15, 16, 20)
+Main.BorderSizePixel = 0
+Main.Active = true
+Main.Parent = ScreenGui
+
+Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 8)
+local Stroke = Instance.new("UIStroke", Main)
+Stroke.Thickness = 1.5
+Stroke.Color = Color3.fromRGB(255, 35, 60)
+
+-- Barra superior arrastrable
+local TopBar = Instance.new("Frame")
+TopBar.Size = UDim2.new(1, 0, 0, 24)
+TopBar.BackgroundColor3 = Color3.fromRGB(11, 12, 15)
+TopBar.BorderSizePixel = 0
+TopBar.Parent = Main
+Instance.new("UICorner", TopBar).CornerRadius = UDim.new(0, 8)
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -10, 1, 0)
+Title.Position = UDim2.new(0, 8, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "APEX SUITE // V3"
+Title.TextColor3 = Color3.fromRGB(240, 240, 245)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 10
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = TopBar
+
+local dragging, dragStart, startPos
+TopBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = Main.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then dragging = false end
+        end)
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - dragStart
+        Main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
+
+-- Contenedor de Botones Principales
+local Controls = Instance.new("Frame")
+Controls.Size = UDim2.new(1, -12, 1, -30)
+Controls.Position = UDim2.new(0, 6, 0, 28)
+Controls.BackgroundTransparency = 1
+Controls.Parent = Main
+
+local ControlsLayout = Instance.new("UIListLayout", Controls)
+ControlsLayout.Padding = UDim.new(0, 4)
+
+-- Función generadora de botones
+local function createButton(text, color, height)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, height or 24)
+    btn.BackgroundColor3 = color
+    btn.Text = text
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 10
+    btn.AutoButtonColor = true
+    btn.Parent = Controls
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 5)
+    return btn
+end
+
+local BtnToggleKillList = createButton("LISTA OBJETIVOS  ▼", Color3.fromRGB(28, 29, 36))
+local BtnKillAction     = createButton("KILL PLAYER", Color3.fromRGB(210, 30, 50), 28)
+local BtnReleaseAction  = createButton("SOLTAR PLAYER", Color3.fromRGB(38, 39, 46))
+
+local Separator = Instance.new("Frame")
+Separator.Size = UDim2.new(1, 0, 0, 1)
+Separator.BackgroundColor3 = Color3.fromRGB(45, 46, 55)
+Separator.BorderSizePixel = 0
+Separator.Parent = Controls
+
+local BtnToggleProxList = createButton("PROXIMITY PLAYER  ▼", Color3.fromRGB(28, 29, 36))
+
+-- Slider de distancia integrado
+local SliderLabel = Instance.new("TextLabel")
+SliderLabel.Size = UDim2.new(1, 0, 0, 14)
+SliderLabel.BackgroundTransparency = 1
+SliderLabel.Text = "RADIO: " .. tostring(guardRadius) .. " STUDS"
+SliderLabel.TextColor3 = Color3.fromRGB(0, 210, 255)
+SliderLabel.Font = Enum.Font.GothamBold
+SliderLabel.TextSize = 9
+SliderLabel.Parent = Controls
+
+local SliderTrack = Instance.new("Frame")
+SliderTrack.Size = UDim2.new(1, 0, 0, 10)
+SliderTrack.BackgroundColor3 = Color3.fromRGB(25, 27, 34)
+SliderTrack.BorderSizePixel = 0
+SliderTrack.Parent = Controls
+Instance.new("UICorner", SliderTrack).CornerRadius = UDim.new(0, 5)
+
+local SliderFill = Instance.new("Frame")
+SliderFill.Size = UDim2.new((guardRadius - 5) / 55, 0, 1, 0)
+SliderFill.BackgroundColor3 = Color3.fromRGB(0, 180, 255)
+SliderFill.BorderSizePixel = 0
+SliderFill.Parent = SliderTrack
+Instance.new("UICorner", SliderFill).CornerRadius = UDim.new(0, 5)
+
+local BtnToggleGuard = createButton("ACTIVAR GUARDIA: [OFF]", Color3.fromRGB(35, 36, 42), 26)
+
+-- ============================================================================
+-- [[ MENÚS LATERALES DESPLEGABLES (PESTAÑAS FLOTANTES) ]]
+-- ============================================================================
+
+-- 1. Ventana lateral para lista de Kill
+local DropdownKillFrame = Instance.new("Frame")
+DropdownKillFrame.Size = UDim2.fromOffset(150, 225)
+DropdownKillFrame.Position = UDim2.new(1, 6, 0, 0) -- Se abre al lado derecho del Hub
+DropdownKillFrame.BackgroundColor3 = Color3.fromRGB(13, 14, 18)
+DropdownKillFrame.BorderSizePixel = 0
+DropdownKillFrame.Visible = false
+DropdownKillFrame.Parent = Main
+
+Instance.new("UICorner", DropdownKillFrame).CornerRadius = UDim.new(0, 8)
+local Stroke1 = Instance.new("UIStroke", DropdownKillFrame)
+Stroke1.Thickness = 1.2
+Stroke1.Color = Color3.fromRGB(255, 35, 60)
+
+local KillTitle = Instance.new("TextLabel")
+KillTitle.Size = UDim2.new(1, 0, 0, 22)
+KillTitle.BackgroundTransparency = 1
+KillTitle.Text = "SELECCIONAR OBJETIVOS"
+KillTitle.TextColor3 = Color3.fromRGB(240, 240, 245)
+KillTitle.Font = Enum.Font.GothamBold
+KillTitle.TextSize = 9
+KillTitle.Parent = DropdownKillFrame
+
+local ScrollKill = Instance.new("ScrollingFrame")
+ScrollKill.Size = UDim2.new(1, -8, 1, -26)
+ScrollKill.Position = UDim2.new(0, 4, 0, 22)
+ScrollKill.BackgroundColor3 = Color3.fromRGB(9, 10, 12)
+ScrollKill.BorderSizePixel = 0
+ScrollKill.ScrollBarThickness = 3
+ScrollKill.AutomaticCanvasSize = Enum.AutomaticSize.Y
+ScrollKill.Parent = DropdownKillFrame
+
+local KillLayout = Instance.new("UIListLayout", ScrollKill)
+KillLayout.Padding = UDim.new(0, 3)
+
+-- 2. Ventana lateral para lista de Proximity
+local DropdownProxFrame = Instance.new("Frame")
+DropdownProxFrame.Size = UDim2.fromOffset(150, 225)
+DropdownProxFrame.Position = UDim2.new(1, 6, 0, 0)
+DropdownProxFrame.BackgroundColor3 = Color3.fromRGB(13, 14, 18)
+DropdownProxFrame.BorderSizePixel = 0
+DropdownProxFrame.Visible = false
+DropdownProxFrame.Parent = Main
+
+Instance.new("UICorner", DropdownProxFrame).CornerRadius = UDim.new(0, 8)
+local Stroke2 = Instance.new("UIStroke", DropdownProxFrame)
+Stroke2.Thickness = 1.2
+Stroke2.Color = Color3.fromRGB(0, 180, 255)
+
+local ProxTitle = Instance.new("TextLabel")
+ProxTitle.Size = UDim2.new(1, 0, 0, 22)
+ProxTitle.BackgroundTransparency = 1
+ProxTitle.Text = "PROXIMITY (PROTEGER)"
+ProxTitle.TextColor3 = Color3.fromRGB(0, 210, 255)
+ProxTitle.Font = Enum.Font.GothamBold
+ProxTitle.TextSize = 9
+ProxTitle.Parent = DropdownProxFrame
+
+local ScrollProx = Instance.new("ScrollingFrame")
+ScrollProx.Size = UDim2.new(1, -8, 1, -26)
+ScrollProx.Position = UDim2.new(0, 4, 0, 22)
+ScrollProx.BackgroundColor3 = Color3.fromRGB(9, 10, 12)
+ScrollProx.BorderSizePixel = 0
+ScrollProx.ScrollBarThickness = 3
+ScrollProx.AutomaticCanvasSize = Enum.AutomaticSize.Y
+ScrollProx.Parent = DropdownProxFrame
+
+local ProxLayout = Instance.new("UIListLayout", ScrollProx)
+ProxLayout.Padding = UDim.new(0, 3)
+
+-- Abrir / Cerrar pestañas de listas
+BtnToggleKillList.MouseButton1Click:Connect(function()
+    DropdownProxFrame.Visible = false
+    DropdownKillFrame.Visible = not DropdownKillFrame.Visible
+end)
+
+BtnToggleProxList.MouseButton1Click:Connect(function()
+    DropdownKillFrame.Visible = false
+    DropdownProxFrame.Visible = not DropdownProxFrame.Visible
+end)
+
+-- Control del Slider
+local isSliding = false
+local function updateSlider(input)
+    local relPos = math.clamp((input.Position.X - SliderTrack.AbsolutePosition.X) / SliderTrack.AbsoluteSize.X, 0, 1)
+    SliderFill.Size = UDim2.new(relPos, 0, 1, 0)
+    guardRadius = math.floor(5 + (relPos * 55))
+    SliderLabel.Text = "RADIO: " .. tostring(guardRadius) .. " STUDS"
+    circleAdornment.Radius = guardRadius
+end
+
+SliderTrack.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        isSliding = true
+        updateSlider(input)
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        isSliding = false
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if isSliding and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        updateSlider(input)
+    end
+end)
+
+-- ============================================================================
+-- [[ MOTOR DE ATAQUE UNIVERSAL (MM2 + ESPADAS) ]]
+-- ============================================================================
+
+local function getWeapon()
+    local char = LocalPlayer.Character
+    local bp = LocalPlayer:FindFirstChild("Backpack")
+    if not char then return nil end
+
+    local names = {"Knife", "Sword", "LinkedSword", "ClassicSword"}
+    for _, n in ipairs(names) do
+        local tool = char:FindFirstChild(n) or (bp and bp:FindFirstChild(n))
+        if tool then return tool end
+    end
+
+    for _, v in ipairs(char:GetChildren()) do if v:IsA("Tool") then return v end end
+    if bp then for _, v in ipairs(bp:GetChildren()) do if v:IsA("Tool") then return v end end end
+    return nil
+end
+
+local function executeInstaKill(targetChar)
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 or not targetChar then return end
+
+    local weapon = getWeapon()
+    if not weapon then return end
+
+    if weapon.Parent == LocalPlayer:FindFirstChild("Backpack") then
+        hum:EquipTool(weapon)
+        task.wait(0.01)
+    end
+
+    if weapon:FindFirstChild("Stab") then
+        weapon.Stab:FireServer("Slash")
+    end
+
+    weapon:Activate()
+
+    local handle = weapon:FindFirstChild("Handle") or weapon:FindFirstChildWhichIsA("BasePart")
+    if handle and typeof(firetouchinterest) == "function" then
+        local tHRP = targetChar:FindFirstChild("HumanoidRootPart") or targetChar:FindFirstChild("Torso") or targetChar:FindFirstChild("UpperTorso")
+        if tHRP then
+            pcall(function()
+                firetouchinterest(tHRP, handle, 0)
+                firetouchinterest(tHRP, handle, 1)
+            end)
+        end
+    end
+end
+
+-- ============================================================================
+-- [[ LÓGICA DE TARGET PURGE (PEGAR AL FRENTE + SIN COLISIÓN) ]]
+-- ============================================================================
+
+local function stopLock()
+    isLockedFront = false
+    BtnKillAction.Text = "KILL PLAYER"
+    BtnKillAction.BackgroundColor3 = Color3.fromRGB(210, 30, 50)
+
+    if lockConn then lockConn:Disconnect() lockConn = nil end
+    if noclipConn then noclipConn:Disconnect() noclipConn = nil end
+
+    for target, _ in pairs(selectedKillPlayers) do
+        if target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
+            target.Character.HumanoidRootPart.AssemblyLinearVelocity = Vector3.zero
+            target.Character.HumanoidRootPart.AssemblyAngularVelocity = Vector3.zero
+        end
+    end
+end
+
+local function startLockAndKill()
+    isLockedFront = true
+    BtnKillAction.Text = "PURGANDO..."
+    BtnKillAction.BackgroundColor3 = Color3.fromRGB(0, 140, 255)
+
+    -- Anula colisiones continuamente en Stepped para que camines sin tropiezos
+    if noclipConn then noclipConn:Disconnect() end
+    noclipConn = RunService.Stepped:Connect(function()
+        if not isLockedFront then return end
+        for target, isSel in pairs(selectedKillPlayers) do
+            if isSel and target.Character then
+                for _, part in ipairs(target.Character:GetDescendants()) do
+                    if part:IsA("BasePart") then part.CanCollide = false end
+                end
+            end
+        end
+    end)
+
+    if lockConn then lockConn:Disconnect() end
+    lockConn = RunService.Heartbeat:Connect(function()
+        local char = LocalPlayer.Character
+        local myHRP = char and char:FindFirstChild("HumanoidRootPart")
+        if not myHRP then return end
+
+        local count = 0
+        for target, isSel in pairs(selectedKillPlayers) do
+            if isSel and target ~= LocalPlayer and target.Character then
+                local tChar = target.Character
+                local tHRP = tChar:FindFirstChild("HumanoidRootPart")
+                local tHum = tChar:FindFirstChildOfClass("Humanoid")
+
+                if tHRP and tHum and tHum.Health > 0 then
+                    count = count + 1
+                    local offset = (count - 1) * 1.2
+                    tHRP.CFrame = myHRP.CFrame * CFrame.new(offset, 0, -2.5)
+                    tHRP.AssemblyLinearVelocity = Vector3.zero
+                    tHRP.AssemblyAngularVelocity = Vector3.zero
+                    executeInstaKill(tChar)
+                end
+            end
+        end
+    end)
+end
+
+BtnKillAction.MouseButton1Click:Connect(startLockAndKill)
+BtnReleaseAction.MouseButton1Click:Connect(stopLock)
+
+-- ============================================================================
+-- [[ PROXIMITY SCANNER (DEFENSA REACTIVA CON CÍRCULO) ]]
+-- ============================================================================
+
+RunService.RenderStepped:Connect(function()
+    if guardEnabled and protectedPlayer and protectedPlayer.Character then
+        local targetHRP = protectedPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if targetHRP then
+            circleAdornment.Visible = true
+            circleAdornment.Adornee = targetHRP
+            circleAdornment.Radius = guardRadius
+            return
+        end
+    end
+    circleAdornment.Visible = false
+    circleAdornment.Adornee = nil
+end)
+
+local guardDebounce = false
+
+local function runProximityScan()
+    if guardLoop then task.cancel(guardLoop) guardLoop = nil end
+
+    guardLoop = task.spawn(function()
+        while guardEnabled do
+            task.wait(0.04)
+            if protectedPlayer and protectedPlayer.Character and LocalPlayer.Character then
+                local protHRP = protectedPlayer.Character:FindFirstChild("HumanoidRootPart")
+                local myHRP = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+
+                if protHRP and myHRP and not guardDebounce then
+                    for _, player in ipairs(Players:GetPlayers()) do
+                        if player ~= LocalPlayer and player ~= protectedPlayer and player.Character then
+                            local enemyChar = player.Character
+                            local enemyHRP = enemyChar:FindFirstChild("HumanoidRootPart")
+                            local enemyHum = enemyChar:FindFirstChildOfClass("Humanoid")
+
+                            if enemyHRP and enemyHum and enemyHum.Health > 0 then
+                                local dist = (protHRP.Position - enemyHRP.Position).Magnitude
+                                if dist <= guardRadius then
+                                    guardDebounce = true
+
+                                    for _, p in ipairs(enemyChar:GetDescendants()) do
+                                        if p:IsA("BasePart") then p.CanCollide = false end
+                                    end
+
+                                    enemyHRP.CFrame = myHRP.CFrame * CFrame.new(0, 0, -2.5)
+                                    enemyHRP.AssemblyLinearVelocity = Vector3.zero
+
+                                    executeInstaKill(enemyChar)
+                                    task.wait(0.08)
+                                    guardDebounce = false
+                                    break
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end
+
+BtnToggleGuard.MouseButton1Click:Connect(function()
+    guardEnabled = not guardEnabled
+    if guardEnabled then
+        BtnToggleGuard.Text = "ACTIVAR GUARDIA: [ON]"
+        BtnToggleGuard.BackgroundColor3 = Color3.fromRGB(0, 180, 255)
+        runProximityScan()
+    else
+        BtnToggleGuard.Text = "ACTIVAR GUARDIA: [OFF]"
+        BtnToggleGuard.BackgroundColor3 = Color3.fromRGB(35, 36, 42)
+        if guardLoop then task.cancel(guardLoop) guardLoop = nil end
+        circleAdornment.Visible = false
+    end
+end)
+
+-- ============================================================================
+-- [[ GENERACIÓN DINÁMICA DE BOTONES EN LAS PESTAÑAS ]]
+-- ============================================================================
+
+local killButtons = {}
+local proxButtons = {}
+
+local function updateDropdowns()
+    for _, b in pairs(killButtons) do b:Destroy() end
+    for _, b in pairs(proxButtons) do b:Destroy() end
+    table.clear(killButtons)
+    table.clear(proxButtons)
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            -- Botón en la lista de Objetivos (Kill)
+            local kBtn = Instance.new("TextButton")
+            kBtn.Size = UDim2.new(1, 0, 0, 22)
+            kBtn.Text = " " .. player.DisplayName
+            kBtn.Font = Enum.Font.Gotham
+            kBtn.TextSize = 10
+            kBtn.TextXAlignment = Enum.TextXAlignment.Left
+            kBtn.BorderSizePixel = 0
+            kBtn.AutoButtonColor = false
+            kBtn.Parent = ScrollKill
+            Instance.new("UICorner", kBtn).CornerRadius = UDim.new(0, 4)
+
+            if selectedKillPlayers[player] then
+                kBtn.BackgroundColor3 = Color3.fromRGB(0, 140, 255) -- AZUL si está seleccionado
+                kBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+            else
+                kBtn.BackgroundColor3 = Color3.fromRGB(20, 21, 26)
+                kBtn.TextColor3 = Color3.fromRGB(180, 180, 190)
+            end
+
+            kBtn.MouseButton1Click:Connect(function()
+                if selectedKillPlayers[player] then
+                    selectedKillPlayers[player] = nil
+                    kBtn.BackgroundColor3 = Color3.fromRGB(20, 21, 26)
+                    kBtn.TextColor3 = Color3.fromRGB(180, 180, 190)
+                else
+                    selectedKillPlayers[player] = true
+                    kBtn.BackgroundColor3 = Color3.fromRGB(0, 140, 255)
+                    kBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+                end
+            end)
+            killButtons[player] = kBtn
+
+            -- Botón en la lista de Proximity (Protegido)
+            local pBtn = Instance.new("TextButton")
+            pBtn.Size = UDim2.new(1, 0, 0, 22)
+            pBtn.Text = " " .. player.DisplayName
+            pBtn.Font = Enum.Font.Gotham
+            pBtn.TextSize = 10
+            pBtn.TextXAlignment = Enum.TextXAlignment.Left
+            pBtn.BorderSizePixel = 0
+            pBtn.AutoButtonColor = false
+            pBtn.Parent = ScrollProx
+            Instance.new("UICorner", pBtn).CornerRadius = UDim.new(0, 4)
+
+            if protectedPlayer == player then
+                pBtn.BackgroundColor3 = Color3.fromRGB(0, 210, 255)
+                pBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+            else
+                pBtn.BackgroundColor3 = Color3.fromRGB(20, 21, 26)
+                pBtn.TextColor3 = Color3.fromRGB(180, 180, 190)
+            end
+
+            pBtn.MouseButton1Click:Connect(function()
+                if protectedPlayer == player then
+                    protectedPlayer = nil
+                else
+                    protectedPlayer = player
+                end
+                updateDropdowns()
+            end)
+            proxButtons[player] = pBtn
+        end
+    end
+end
+
+Players.PlayerAdded:Connect(function() task.wait(0.2) updateDropdowns() end)
+Players.PlayerRemoving:Connect(function(player)
+    selectedKillPlayers[player] = nil
+    if protectedPlayer == player then protectedPlayer = nil end
+    updateDropdowns()
+end)
+
+updateDropdowns()
